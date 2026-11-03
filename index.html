@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="nl">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="initial-scale=1,user-scalable=no,maximum-scale=1,width=device-width">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <link rel="stylesheet" href="css/leaflet.css">
+        <link rel="stylesheet" href="css/L.Control.Layers.Tree.css">
+        <link rel="stylesheet" href="css/qgis2web.css">
+        <link rel="stylesheet" href="css/fontawesome-all.min.css">
+        <link rel="stylesheet" href="css/leaflet.photon.css">
+        
+        <!-- Chart.js bibliotheek inladen -->
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+        <style>
+            body {
+                display: flex;
+                flex-direction: row;
+                margin: 0;
+                padding: 10px;
+                font-family: sans-serif;
+                background-color: #f4f4f4;
+            }
+            #map {
+                width: 850px;
+                height: 626px;
+                background: #fff;
+                box-shadow: 0 0 10px rgba(0,0,0,0.1);
+                flex-shrink: 0;
+            }
+            #dashboard-panel {
+                width: 500px;
+                height: 626px;
+                padding: 20px;
+                background: #fff;
+                margin-left: 20px;
+                box-shadow: 0 0 10px rgba(0,0,0,0.1);
+                display: flex;
+                flex-direction: column;
+                box-sizing: border-box;
+                overflow-y: auto;
+            }
+            #chart-container {
+                position: relative;
+                width: 100%;
+                height: 290px;
+                margin-top: 5px;
+            }
+            /* Stijl voor de gemeentelabels op de kaart */
+            .map-label {
+                background: rgba(255, 255, 255, 0.9);
+                border: 1px solid #333;
+                font-weight: bold;
+                font-size: 13px;
+                color: #000;
+                padding: 3px 6px;
+                border-radius: 4px;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+            }
+            /* Stijl voor steden: Transparante achtergrond zonder tegeltjes */
+            .city-pin-label {
+                background: transparent !important;
+                border: none !important;
+                box-shadow: none !important;
+                font-weight: bold;
+                font-size: 12px;
+                color: #ffffff;
+                text-shadow: 1px 1px 3px #000000, -1px -1px 3px #000000, 1px -1px 3px #000000, -1px 1px 3px #000000;
+                white-space: nowrap;
+            }
+        </style>
+        <title>Landgebruik & Landbouw Dashboard</title>
+    </head>
+    <body>
+        <div id="map"></div>
+
+        <!-- Dashboard paneel -->
+        <div id="dashboard-panel">
+            <h3 id="chart-title" style="margin:0 0 5px 0;">Landgebruik per Gemeente</h3>
+            <p style="font-size: 12px; color: #666; margin-top:0;">Klik op een gemeente op de kaart om in te zoomen en de landbouwdata te laden.</p>
+            
+            <!-- Steden / kernen kopje per gemeente -->
+            <div id="steden-container" style="background: #eef4f8; padding: 10px; border-radius: 5px; border: 1px solid #d0e1ed; margin-bottom: 10px;">
+                <b style="color: #1a5276; display: block; margin-bottom: 3px;">📍 Belangrijke steden en kernen:</b>
+                <span id="steden-tekst" style="color: #333; font-size: 13px;">Nog geen gemeente geselecteerd. Klik op een gemeente.</span>
+            </div>
+
+            <!-- Slider voor transparantie -->
+            <div style="background: #f9f9f9; padding: 10px; border-radius: 5px; border: 1px solid #ddd; margin-bottom: 5px;">
+                <label for="opacitySlider" style="font-size: 12px; font-weight: bold; display: block; margin-bottom: 5px;">
+                    Transparantie landbouwlaag: <span id="opacityValue">100%</span>
+                </label>
+                <input type="range" id="opacitySlider" min="0" max="1" step="0.05" value="1" style="width: 100%; cursor: pointer;">
+            </div>
+
+            <div id="chart-container">
+                <canvas id="landbouwChart"></canvas>
+            </div>
+        </div>
+
+        <script src="js/qgis2web_expressions.js"></script>
+        <script src="js/leaflet.js"></script>
+        <script src="js/L.Control.Layers.Tree.min.js"></script>
+        <script src="js/multi-style-layer.js"></script>
+        <script src="js/leaflet.rotatedMarker.js"></script>
+        <script src="js/leaflet.pattern.js"></script>
+        <script src="js/leaflet-hash.js"></script>
+        <script src="js/Autolinker.min.js"></script>
+        <script src="js/rbush.min.js"></script>
+        <script src="js/labelgun.min.js"></script>
+        <script src="js/labels.js"></script>
+        <script src="js/leaflet.photon.js"></script>
+        
+        <!-- GeoJSON bestand van je gemeenten -->
+        <script src="data/Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2.js"></script>
+        
+        <script>
+        var map = L.map('map', {
+            zoomControl: false, maxZoom: 28, minZoom: 1
+        }).fitBounds([[51.619325207711334,5.708754775193804],[51.74151470861931,6.094357925081863]]);
+        
+        var hash = new L.Hash(map);
+        map.attributionControl.setPrefix('<a href="https://github.com/qgis2web/qgis2web" target="_blank">qgis2web</a> &middot; <a href="https://leafletjs.com">Leaflet</a>');
+        
+        var autolinker = new Autolinker({truncate: {length: 30, location: 'smart'}});
+
+        function removeEmptyRowsFromPopupContent(content, feature) {
+            var tempDiv = document.createElement('div');
+            tempDiv.innerHTML = content;
+            var rows = tempDiv.querySelectorAll('tr');
+            for (var i = 0; i < rows.length; i++) {
+                var td = rows[i].querySelector('td.visible-with-data');
+                var key = td ? td.id : '';
+                if (td && td.classList.contains('visible-with-data') && feature.properties[key] == null) {
+                    rows[i].parentNode.removeChild(rows[i]);
+                }
+            }
+            return tempDiv.innerHTML;
+        }
+
+        var zoomControl = L.control.zoom({ position: 'topleft' }).addTo(map);
+        var bounds_group = new L.featureGroup([]);
+
+        // --- SATELLIET BASEMAP ---
+        var layer_Satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS',
+            maxZoom: 19
+        });
+        map.addLayer(layer_Satellite);
+
+        // --- RASTERLAAG ---
+        var img_landgebruik_nieuwecategorin_1 = 'data/landgebruik_nieuwecategorin_1.png';
+        var img_bounds_landgebruik_nieuwecategorin_1 = [[51.502752572252184,5.6890949742709855],[51.77511764619864,6.218204262070202]];
+        var layer_landgebruik_nieuwecategorin_1 = new L.imageOverlay(img_landgebruik_nieuwecategorin_1, img_bounds_landgebruik_nieuwecategorin_1);
+        map.addLayer(layer_landgebruik_nieuwecategorin_1);
+
+        // --- DATASET MET HECTAREN EN KERNEN/STEDEN PER GEMEENTE ---
+        // Volgorde waardes: [Cat1, Cat2, Cat3, Cat4, Cat5, Cat6, Cat8, Cat9, Cat45, Cat61, Cat62]
+        var gemeenteData = {
+            1: { // Bergen[cite: 5]
+                naam: "Bergen",
+                steden: "Bergen, Aijen, Afferden, Siebengewald, Well, Wellerlooi",
+                hectares: [1611.915, 698.7075, 351.6925, 254.3475, 344.1875, 746.825, 50.1525, 11.8375, 477.915, 69.0275, 2.0225]
+            },
+            2: { // Gennep[cite: 5]
+                naam: "Gennep",
+                steden: "Gennep, Milsbeek, Ottersum, Ven-Zelderheide",
+                hectares: [1108.3575, 396.3375, 198.2575, 171.9125, 243.7575, 206.405, 3.41, 7.31, 223.865, 29.4675, 0.53]
+            },
+            3: { // Land van Cuijk[cite: 5]
+                naam: "Land van Cuijk",
+                steden: "Cuijk, Boxmeer, Mill, Sint Anthonis, Grave, Beers, Haps, Velp, Wanroij",
+                hectares: [7419.1825, 4973.6575, 1785.7175, 1051.7675, 783.3575, 2864.8875, 35.94, 20.0325, 1316.2825, 687.3275, 141.0775]
+            }
+        };
+
+        // --- STEDEN / KERNEN MET LOSSE SPELDENKNOPPEN (GEEN TEGELS) ---
+        var stedenCoordinaten = [
+            { naam: "Gennep", lat: 51.703, lng: 5.965 },
+            { naam: "Milsbeek", lat: 51.760, lng: 5.945 },
+            { naam: "Ottersum", lat: 51.715, lng: 5.985 },
+            { naam: "Bergen", lat: 51.545, lng: 6.050 },
+            { naam: "Well", lat: 51.535, lng: 6.120 },
+            { naam: "Afferden", lat: 51.615, lng: 6.010 },
+            { naam: "Siebengewald", lat: 51.635, lng: 6.095 },
+            { naam: "Cuijk", lat: 51.725, lng: 5.885 },
+            { naam: "Boxmeer", lat: 51.645, lng: 5.945 },
+            { naam: "Mill", lat: 51.682, lng: 5.890 },
+            { naam: "Grave", lat: 51.758, lng: 5.742 },
+            { naam: "Sint Anthonis", lat: 51.630, lng: 5.875 }
+        ];
+
+        // Voeg steden toe als prikkers met losse tekst
+        stedenCoordinaten.forEach(function(stad) {
+            L.marker([stad.lat, stad.lng], {
+                icon: L.divIcon({
+                    className: 'city-pin-label',
+                    html: '📍 ' + stad.naam,
+                    iconSize: [120, 20],
+                    iconAnchor: [10, 10]
+                })
+            }).addTo(map);
+        });
+
+        // --- EXACTE KLEUREN UIT JOUW LEGENDASCREENSHOTS ---
+        // Cat 1 (Groen), Cat 2 (Geel), Cat 3 (Bruin), Cat 4 (Rood), Cat 5 (Oranje), Cat 6 (Roze), 
+        // Cat 8 (Cyaan), Cat 9 (Boomgaarden - Paars-roze), Cat 45 (Lichtgroen), Cat 61 (Blauw), Cat 62 (Donkerpaars)
+        var qgisColors = [
+            '#439427', // 1: AG Gras (Donkergroen)[cite: 5]
+            '#f5eb38', // 2: Maïs (Geel)[cite: 5]
+            '#916035', // 3: Aardappelen (Bruin)[cite: 5]
+            '#ed4539', // 4: Bieten (Rood)[cite: 5]
+            '#f78e25', // 5: Granen (Oranje)[cite: 5]
+            '#e65cd5', // 6: Overige landbouw (Roze)[cite: 5]
+            '#7de6d7', // 8: Glastuinbouw (Cyaan/Lichtblauw)[cite: 6]
+            '#d6459b', // 9: Boomgaarden (Magenta/Roze)
+            '#9bd485', // 45: Natuurlijk AG Gras (Lichtgroen)[cite: 6]
+            '#3b76f6', // 61: Boomkwekerijen (Blauw)[cite: 6]
+            '#7314ca'  // 62: Fruitkwekerijen (Donkerpaars)[cite: 6]
+        ];
+
+        var gewasLabels = [
+            'AG Gras (Cat 1)', 
+            'Maïs (Cat 2)', 
+            'Aardappelen (Cat 3)', 
+            'Bieten (Cat 4)', 
+            'Granen (Cat 5)', 
+            'Overige landbouw (Cat 6)', 
+            'Glastuinbouw (Cat 8)', 
+            'Boomgaarden (Cat 9)', 
+            'Natuurlijk AG Gras (Cat 45)', 
+            'Boomkwekerijen (Cat 61)', 
+            'Fruitkwekerijen (Cat 62)'
+        ];
+
+        // --- CHART.JS GRAFIEK (VOLLEDIG & COMPLEET) ---
+        var ctx = document.getElementById('landbouwChart').getContext('2d');
+        var landbouwChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: gewasLabels,
+                datasets: [{
+                    label: 'Oppervlakte (ha)',
+                    data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    backgroundColor: qgisColors,
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                indexAxis: 'y',
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    x: { beginAtZero: true, title: { display: true, text: 'Hectaren (ha)' } },
+                    y: {
+                        ticks: {
+                            font: { size: 10 }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Popups, permanente labels en interactie per gemeente
+        function pop_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2(feature, layer) {
+            var props = feature.properties;
+            var objId = props['OBJECTID'] || props['objectid'] || props['FID'];
+            var gemeenteInfo = gemeenteData[objId] || { naam: props['gm_naam'] || 'Gemeente', steden: 'Onbekend', hectares: [] };
+
+            // Permanente gemeentenaam label op de kaart
+            layer.bindTooltip(gemeenteInfo.naam, {
+                permanent: true,
+                direction: 'center',
+                className: 'map-label'
+            }).openTooltip();
+
+            var popupContent = '<table><tr><td><b>Gemeente:</b> ' + gemeenteInfo.naam + '</td></tr></table>';
+            var content = removeEmptyRowsFromPopupContent(popupContent, feature);
+            layer.bindPopup(content, { maxHeight: 400 });
+
+            layer.on('click', function(e) {
+                map.fitBounds(e.target.getBounds(), { padding: [50, 50] });
+                
+                // Update titel en stedenlijst in het paneel
+                document.getElementById('chart-title').innerText = `Landgebruik in ${gemeenteInfo.naam}`;
+                document.getElementById('steden-tekst').innerText = gemeenteInfo.steden;
+
+                if (gemeenteInfo.hectares.length > 0) {
+                    landbouwChart.data.datasets[0].data = gemeenteInfo.hectares;
+                    landbouwChart.update();
+                }
+            });
+        }
+
+        function style_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2_0() {
+            return {
+                pane: 'pane_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2',
+                opacity: 1,
+                color: 'rgba(35,35,35,1.0)',
+                weight: 3.0,
+                fill: true,
+                fillOpacity: 0.15,
+                fillColor: 'rgba(243,166,178,1.0)',
+                interactive: true,
+            }
+        }
+        function style_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2_1() {
+            return {
+                pane: 'pane_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2',
+                opacity: 1,
+                color: 'rgba(255,255,255,1.0)',
+                weight: 1.0,
+                fill: true,
+                fillOpacity: 0.0,
+                interactive: true,
+            }
+        }
+
+        map.createPane('pane_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2');
+        map.getPane('pane_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2').style.zIndex = 402;
+
+        var layer_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2 = new L.geoJson.multiStyle(json_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2, {
+            attribution: '',
+            interactive: true,
+            dataVar: 'json_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2',
+            layerName: 'layer_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2',
+            pane: 'pane_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2',
+            onEachFeature: pop_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2,
+            styles: [style_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2_0, style_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2_1]
+        });
+
+        bounds_group.addLayer(layer_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2);
+        map.addLayer(layer_Landgebruik_mooimaasvalleiRegio_mooimaasvallei_ExportFeatures_2);
+
+        // --- TRANSPARANTIE SLIDER LOGICA ---
+        var opacitySlider = document.getElementById('opacitySlider');
+        var opacityValue = document.getElementById('opacityValue');
+
+        opacitySlider.addEventListener('input', function(e) {
+            var val = parseFloat(e.target.value);
+            layer_landgebruik_nieuwecategorin_1.setOpacity(val);
+            opacityValue.innerText = Math.round(val * 100) + '%';
+        });
+
+        // Herbereken kaartformaat voor de flexbox layout
+        setTimeout(function() {
+            map.invalidateSize();
+        }, 200);
+        </script>
+    </body>
+</html>
